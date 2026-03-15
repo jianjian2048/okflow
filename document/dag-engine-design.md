@@ -1,7 +1,7 @@
 # DAG 工作流引擎 — 设计文档
 
-> 本文档描述 **dag-engine** 独立库的核心设计，供实现与接入参考。
-> dag-engine 是一个通用的异步 DAG 工作流执行引擎，与具体业务逻辑解耦，
+> 本文档描述 **okflow** 独立库的核心设计，供实现与接入参考。
+> okflow 是一个通用的异步 DAG 工作流执行引擎，与具体业务逻辑解耦，
 > 通过 `ActionRegistry` 插件机制支持任意外部系统集成。
 
 ---
@@ -11,13 +11,15 @@
 1. [设计目标](#1-设计目标)
 2. [整体架构](#2-整体架构)
 3. [Schema 层：工作流定义](#3-schema-层工作流定义)
-4. [RunContext：执行上下文](#4-runcontext执行上下文)
-5. [NodeExecutor：节点执行器体系](#5-nodeexecutor节点执行器体系)
-6. [DAGExecutor：调度引擎](#6-dagexecutor调度引擎)
-7. [四种内置节点的行为细节](#7-四种内置节点的行为细节)
-8. [静态校验管道](#8-静态校验管道)
-9. [ActionRegistry：外部动作扩展接口](#9-actionregistry外部动作扩展接口)
-10. [接入方式示例](#10-接入方式示例)
+4. [Scope 与 ScopeGroup](#4-scope-与-scopegroup)
+5. [RunContext：执行上下文](#5-runcontext执行上下文)
+6. [NodeExecutor：节点执行器体系](#6-nodeexecutor节点执行器体系)
+7. [DAGExecutor：调度引擎](#7-dagexecutor调度引擎)
+8. [四种内置节点的行为细节](#8-四种内置节点的行为细节)
+9. [静态校验管道](#9-静态校验管道)
+10. [ActionRegistry：外部动作扩展接口](#10-actionregistry外部动作扩展接口)
+11. [接入方式示例](#11-接入方式示例)
+12. [附录：异常层次](#附录异常层次)
 
 ---
 
@@ -25,12 +27,12 @@
 
 | 目标 | 说明 |
 |------|------|
-| **依赖驱动并发** | 节点不指定执行顺序，只声明 `depends_on`，引擎自动并发执行无依赖关系的节点 |
-| **结构化控制流** | 支持条件分支（condition）、列表迭代（foreach）、条件循环（while）嵌套子工作流 |
-| **上下文隔离与共享** | foreach 每次迭代创建子上下文，while 与父共享上下文；两种语义都有明确用途 |
-| **快速跳过** | condition 节点选择分支后，未选分支的所有下游节点通过 BFS 级联标记，无需等待 wave 轮次 |
+| **依赖驱动并发** | 节点只声明 `depends_on`，引擎自动并发执行无依赖关系的节点 |
+| **通用控制流** | condition / foreach / while 是普通节点，通过创建 `ScopeGroup` 实现控制流，不需要引擎特殊处理 |
+| **显式 I/O 边界** | Scope 有明确的 `outputs` 声明，子执行单元只能通过声明的出口影响父上下文 |
+| **灵活并发控制** | ScopeGroup 的执行模式（exclusive / parallel / sequential / pooled）由节点动态声明，支持并发上限 |
 | **异常透传层次** | 引擎内部异常直接抛出，节点业务异常包装为 `NodeExecutionError` |
-| **可扩展节点类型** | 通过注册 `NodeExecutor` 子类即可添加新节点类型，无需修改调度引擎 |
+| **可扩展节点类型** | 注册 `NodeExecutor` 子类即可添加新节点类型；自定义节点同样可以创建 `ScopeGroup` |
 | **业务逻辑零侵入** | 引擎不依赖任何具体业务，通过 `ActionRegistry` 注册异步处理函数对接外部系统 |
 
 ---
@@ -45,12 +47,19 @@ graph TD
         WF --> VAL
     end
 
+    subgraph scope_layer ["Scope 层"]
+        SC[Scope]
+        SG[ScopeGroup]
+        SC --> SG
+    end
+
     subgraph engine ["Engine 层"]
         EXEC[DAGExecutor]
         CTX[RunContext]
         EXS[NodeExecutors]
         EXEC --> CTX
         EXEC --> EXS
+        EXEC --> SG
     end
 
     subgraph ext ["外部扩展（业务侧）"]
@@ -59,11 +68,14 @@ graph TD
         REG --> H
     end
 
-    WF --> EXEC
+    WF --> SC
     VAL --> EXEC
+    EXS -- "返回 ScopeGroup" --> SG
+    SG -- "递归子工作流" --> EXEC
     EXS --> REG
-    EXS -- "递归子工作流" --> EXEC
 ```
+
+**执行入口**：调用方将 `WorkflowDef` 和初始上下文包装为根 `Scope`，交给 `DAGExecutor` 运行。`DAGExecutor` 调度 Scope 内的节点；若节点返回 `ScopeGroup`，引擎按模式递归调度子 Scope。
 
 ---
 
@@ -83,22 +95,10 @@ class EdgeDef(BaseModel):
     to: str                            # 后继节点 ID
 ```
 
-工作流以 JSON 或 dict 加载，Pydantic 负责反序列化与类型校验。引擎在运行时遍历 `edges` 构建后继节点表（`successors`）和入度表（`in_degree`）。
-
 ### 3.2 NodeDef 类型体系
 
 ```mermaid
 classDiagram
-    class WorkflowDef {
-        id: str
-        name: str
-        nodes: list~NodeDef~
-        edges: list~EdgeDef~
-    }
-    class EdgeDef {
-        from: str
-        to: str
-    }
     class NodeDef {
         <<union, discriminator: type>>
         id: str
@@ -114,136 +114,170 @@ classDiagram
         type = "condition"
         handler: str
         params: dict
-        branches: dict~str, str~
+        branches: dict~str, WorkflowDef~
+        outputs: list~str~
     }
     class ForEachNodeDef {
         type = "foreach"
         items: str
         item_var: str
         collect_key: str
+        concurrency: int | None
         sub_workflow: WorkflowDef
     }
     class WhileNodeDef {
         type = "while"
         condition: str
         max_iterations: int
+        outputs: list~str~
         sub_workflow: WorkflowDef
     }
-    WorkflowDef "1" *-- "n" NodeDef
-    WorkflowDef "1" *-- "n" EdgeDef
     NodeDef <|-- ActionNodeDef
     NodeDef <|-- ConditionNodeDef
     NodeDef <|-- ForEachNodeDef
     NodeDef <|-- WhileNodeDef
-    ForEachNodeDef *-- WorkflowDef
-    WhileNodeDef *-- WorkflowDef
 ```
 
-**关键设计点：**
+**与原设计的关键变化：**
 
-- `handler` 是引擎唯一关心的字段——它是 `ActionRegistry` 中注册的处理器名称，引擎不感知其背后的实现。
-- 节点间的依赖关系通过顶层 `edges`（`from` / `to`）声明，引擎从中构建后继节点表（`successors`）和入度表（`in_degree`）。节点本身不内嵌依赖信息，保持节点定义与图拓扑分离。
-- `ForEachNodeDef` 和 `WhileNodeDef` 内嵌完整的 `sub_workflow`，形成递归结构，因此需要调用 `model_rebuild()` 来解析前向引用。
-- 判别联合（`discriminator="type"`）让 Pydantic 在反序列化时按 `type` 字段自动路由到正确的子模型，无需手动 `if/elif`。
+- `ConditionNodeDef.branches` 值类型从 `str`（节点 ID）改为 `WorkflowDef`，支持任意数量的具名分支（不限于 true/false）
+- `ConditionNodeDef` 和 `WhileNodeDef` 新增 `outputs: list[str]`，显式声明哪些变量写回父上下文
+- `ForEachNodeDef` 新增 `concurrency: int | None`，控制并发迭代上限
+- `ForEachNodeDef` 和 `WhileNodeDef` 仍内嵌完整 `sub_workflow`，需调用 `model_rebuild()` 解析前向引用
 
-### 3.3 工作流 JSON 示例
+---
 
-```json
-{
-  "id": "example_workflow",
-  "name": "示例工作流",
-  "nodes": [
-    {
-      "id": "fetch_list",
-      "type": "action",
-      "handler": "http.get",
-      "params": { "url": "https://api.example.com/items" },
-      "output_key": "items"
-    },
-    {
-      "id": "check_nonempty",
-      "type": "condition",
-      "handler": "builtin.is_truthy",
-      "params": { "value": "$fetch_list.items" },
-      "branches": { "true": "process_each", "false": "notify_empty" }
-    },
-    {
-      "id": "process_each",
-      "type": "foreach",
-      "items": "$fetch_list.items",
-      "item_var": "item",
-      "collect_key": "result",
-      "sub_workflow": {
-        "id": "process_item",
-        "name": "处理单个元素",
-        "nodes": [
-          {
-            "id": "do_work",
-            "type": "action",
-            "handler": "my_app.process",
-            "params": { "data": "$item" },
-            "output_key": "result"
-          }
-        ],
-        "edges": []
-      }
-    },
-    {
-      "id": "notify_empty",
-      "type": "action",
-      "handler": "notify.send",
-      "params": { "message": "列表为空，跳过处理" }
-    }
-  ],
-  "edges": [
-    { "from": "fetch_list",    "to": "check_nonempty" },
-    { "from": "check_nonempty", "to": "process_each"  },
-    { "from": "check_nonempty", "to": "notify_empty"  }
-  ]
-}
+## 4. Scope 与 ScopeGroup
+
+### 4.1 Scope
+
+**Scope** 是带显式输出边界的执行单元，包含一个子工作流及其 I/O 声明。
+
+```python
+class Scope:
+    inputs: dict[str, Any]       # 显式传入子工作流的变量绑定
+    inherit_parent: bool         # True：在 inputs 基础上继承父上下文全部变量
+    outputs: list[str]           # 执行结束后提升到父上下文的变量键列表
+    workflow: WorkflowDef        # 要执行的子工作流
+```
+
+**变量可见性规则：**
+
+| `inherit_parent` | 子工作流可读的变量 | 可写回父上下文的变量 |
+|------------------|--------------------|----------------------|
+| `False`（隔离）  | 仅 `inputs` 中声明的变量 | 仅 `outputs` 中声明的变量 |
+| `True`（透明）   | `inputs` 绑定 + 父上下文全部变量 | 仅 `outputs` 中声明的变量 |
+
+- **foreach** 使用 `inherit_parent=False`：每次迭代完全隔离，防止跨迭代变量污染
+- **condition / while** 使用 `inherit_parent=True`：分支/循环体需要读取父上下文中的任意变量，但写回仍受 `outputs` 约束
+
+### 4.2 ScopeGroup
+
+**ScopeGroup** 是一批 Scope 加上执行模式，由节点的 `execute()` 方法动态创建并返回给引擎。
+
+```python
+class ScopeGroup:
+    scopes: list[Scope]
+    mode: Literal["exclusive", "parallel", "sequential", "pooled"]
+
+    # pooled 模式专用
+    concurrency: int | None = None    # 最大并发数，None 表示不限
+    collect_key: str | None = None    # 父上下文中收集结果列表的目标键
+
+    # sequential + repeat 专用（while 节点使用）
+    repeat: bool = False
+    repeat_until: Callable[[RunContext], bool] | None = None
+    max_iterations: int | None = None
+```
+
+**四种执行模式：**
+
+| 模式 | 语义 | 典型场景 |
+|------|------|---------|
+| `exclusive` | 运行 `scopes` 列表中的所有 Scope（节点已预选，通常只有一个） | condition 分支 |
+| `parallel` | 所有 Scope 完全并发运行 | fan-out |
+| `sequential` | 顺序运行，前一个 Scope 的 outputs 自动注入下一个 Scope 的 inputs | pipeline |
+| `pooled` | 并发运行，受 `concurrency` 限制；结果收集到 `collect_key` 指定的列表 | foreach 批量处理 |
+
+### 4.3 ScopeGroup 结果写回规则
+
+| 模式 | 结果如何写回父上下文 |
+|------|-------------------|
+| `exclusive` | 被运行的 Scope 的 outputs 直接提升 |
+| `parallel` | 每个 Scope 的 outputs 各自提升（键名冲突时报 `ScopeOutputConflictError`） |
+| `sequential`（非 repeat）| 最后一个 Scope 的 outputs 提升；中间 Scope 的 outputs 仅供下一 Scope 读取 |
+| `sequential` + `repeat` | 每轮 outputs 提升到父上下文，供下一轮 `repeat_until` 条件判断 |
+| `pooled` | 每个 Scope 的 outputs 按顺序收集为 `collect_key` 键下的列表 |
+
+**`pooled` 收集示例：**
+
+```
+ScopeGroup(mode="pooled", collect_key="results")
+  scope[item=A] → outputs: {"do_work.result": "x"}
+  scope[item=B] → outputs: {"do_work.result": "y"}
+  scope[item=C] → outputs: {"do_work.result": "z"}
+           ↓
+父上下文: "results" = ["x", "y", "z"]
+```
+
+### 4.4 sequential 模式的变量传递
+
+引擎在 sequential 模式下顺序运行每个 Scope 后，将其 outputs 合并注入下一个 Scope 的 inputs（在已声明 inputs 基础上追加/覆盖）。用户无需手动声明跨 Scope 的变量传递，引擎自动处理。
+
+```
+scope[0] 执行完毕 → outputs: {"step1.result": "A"}
+           ↓ 引擎将 outputs 注入 scope[1].inputs
+scope[1] 执行（inputs 中有 "step1.result"）→ outputs: {"step2.result": "B"}
+           ↓
+...
+```
+
+### 4.5 整体结构示意
+
+```
+DAGExecutor
+└── 根 Scope（顶层工作流）
+    ├── ActionNode          ─ execute() 返回 None，不创建 Scope
+    ├── ConditionNode       ─ execute() 返回 ScopeGroup(mode="exclusive")
+    │   └── Scope(inherit_parent=True, outputs=[...], workflow=chosen_branch)
+    ├── ForEachNode         ─ execute() 返回 ScopeGroup(mode="pooled")
+    │   ├── Scope(inherit_parent=False, inputs={item_var: A}, outputs=[collect_key])
+    │   ├── Scope(inherit_parent=False, inputs={item_var: B}, outputs=[collect_key])
+    │   └── Scope(inherit_parent=False, inputs={item_var: C}, outputs=[collect_key])
+    └── WhileNode           ─ execute() 返回 ScopeGroup(mode="sequential", repeat=True)
+        └── Scope(inherit_parent=True, outputs=[...], workflow=sub_workflow)
 ```
 
 ---
 
-## 4. RunContext：执行上下文
+## 5. RunContext：执行上下文
 
-`RunContext` 是整个执行过程的"内存空间"，承担三项职责：
+每个 Scope 在执行时拥有独立的 `RunContext` 实例。
 
 ```mermaid
 classDiagram
     class RunContext {
         -_store: dict
-        -_skipped: set
         +set(key, value)
         +get(key) Any
         +resolve(params) Any
         +eval_condition(expr) bool
-        +child(**extra) RunContext
-        +merge(sub_ctx)
-        +mark_skipped(node_id)
-        +is_skipped(node_id) bool
+        +snapshot() dict
     }
 ```
 
-### 4.1 变量命名约定
+### 5.1 变量命名约定
 
 节点写入输出时键名为 `"{node_id}.{output_key}"`，下游节点通过 `$` 前缀引用：
 
-```json
-{ "id": "fetch_data", "type": "action", "handler": "http.get",
-  "params": { "url": "https://api.example.com/data" }, "output_key": "body" }
+```
+fetch_data 节点 output_key="body" → ctx.set("fetch_data.body", result)
+下游节点 params: {"input": "$fetch_data.body"} → resolve() 展开为实际值
 ```
 
-```json
-{ "id": "process", "type": "action", "handler": "my_app.transform",
-  "params": { "input": "$fetch_data.body" }, "depends_on": ["fetch_data"] }
-```
+### 5.2 $ref 解析
 
-执行后 `fetch_data.body` 写入 ctx，`process` 节点的 `$fetch_data.body` 在执行前由 `resolve()` 展开为实际值。
-
-### 4.2 $ref 解析
-
-`resolve()` 递归处理 dict / list / str，将匹配 `^\$([a-zA-Z_][\w.]*)$` 的字符串替换为 ctx 中对应的值。非 `$ref` 字面量原样返回。
+`resolve()` 递归处理 dict / list / str，将匹配 `^\$([a-zA-Z_][\w.]*)$` 的字符串替换为 ctx 中对应值：
 
 ```
 "$fetch_data.body"     →  ctx.get("fetch_data.body") 的实际值
@@ -251,9 +285,9 @@ classDiagram
 ["$tag_a", "static"]   →  [ctx.get("tag_a"), "static"]
 ```
 
-### 4.3 条件 DSL
+### 5.3 条件 DSL
 
-`eval_condition()` 支持受限表达式，不使用 `eval()`，安全可预期：
+`eval_condition()` 支持受限表达式，不使用 `eval()`：
 
 | 格式 | 示例 |
 |------|------|
@@ -263,18 +297,24 @@ classDiagram
 
 右值类型自动推断：`true/false` → bool，`null` → None，整数 → int，浮点 → float，引号字符串 → str。
 
-### 4.4 子上下文语义
+### 5.4 Scope 上下文的构建
 
-| 节点类型 | 子上下文策略 | 原因 |
-|----------|-------------|------|
-| `foreach` | `ctx.child(**{item_var: item})` — 每次迭代创建独立副本 | 防止迭代间变量污染；父上下文不受子工作流写入影响 |
-| `while` | 直接传入 `ctx`（共享） | 子工作流对变量的修改要能影响下次迭代的条件判断 |
+引擎在运行 Scope 时构建其 `RunContext`：
+
+```python
+def build_ctx(scope: Scope, parent_ctx: RunContext) -> RunContext:
+    store = {}
+    if scope.inherit_parent:
+        store.update(parent_ctx.snapshot())   # 继承父上下文全部变量
+    store.update(scope.inputs)                # 显式 inputs 优先级更高（覆盖同名父变量）
+    return RunContext(store)
+```
 
 ---
 
-## 5. NodeExecutor：节点执行器体系
+## 6. NodeExecutor：节点执行器体系
 
-### 5.1 抽象基类
+### 6.1 抽象基类
 
 ```python
 class NodeExecutor(ABC):
@@ -284,20 +324,17 @@ class NodeExecutor(ABC):
         node: Any,
         ctx: RunContext,
         registry: ActionRegistry,
-        graph: dict[str, list[str]],
-    ) -> None: ...
+    ) -> ScopeGroup | None:
+        """
+        返回 None：节点直接执行完毕，无子 Scope。
+        返回 ScopeGroup：引擎按模式调度子 Scope。
+        """
+        ...
 ```
 
-四个参数的含义：
+`graph` 参数从签名中移除——条件跳过逻辑由 `exclusive` 模式的 ScopeGroup 取代，节点不再需要感知图结构。
 
-| 参数 | 类型 | 用途 |
-|------|------|------|
-| `node` | 各 NodeDef 子类 | 节点配置（handler、params、branches 等） |
-| `ctx` | `RunContext` | 变量读写、条件求值、标记跳过 |
-| `registry` | `ActionRegistry` | 调用已注册的处理函数（与外部系统交互） |
-| `graph` | `dict[str, list[str]]` | 后继节点表，condition 节点 BFS 跳过时需要遍历下游 |
-
-### 5.2 分发表（dispatch table）
+### 6.2 分发表
 
 ```python
 _EXECUTORS: dict[NodeType, NodeExecutor] = {
@@ -308,226 +345,229 @@ _EXECUTORS: dict[NodeType, NodeExecutor] = {
 }
 ```
 
-模块级单例，不持有状态，并发安全。**新增节点类型**只需三步：
+**新增节点类型**的步骤：
 1. 定义新的 `NodeDef` 子类并加入判别联合
-2. 实现对应的 `NodeExecutor` 子类
+2. 实现 `NodeExecutor` 子类，`execute()` 返回 `ScopeGroup | None`
 3. 注册到 `_EXECUTORS`
+
+自定义节点可以创建任意模式的 ScopeGroup，无需修改调度引擎。
 
 ---
 
-## 6. DAGExecutor：调度引擎
+## 7. DAGExecutor：调度引擎
 
-### 6.1 Kahn 算法 + Wave 并发
+### 7.1 入口
+
+```python
+class DAGExecutor:
+    def __init__(self, registry: ActionRegistry) -> None:
+        self._registry = registry
+
+    async def run(self, scope: Scope) -> RunContext:
+        """运行一个 Scope，返回其执行后的 RunContext。"""
+        ctx = build_ctx(scope, parent_ctx=RunContext())
+        await self._run_workflow(scope.workflow, ctx)
+        return ctx
+
+    async def run_with_parent(self, scope: Scope, parent_ctx: RunContext) -> RunContext:
+        """运行子 Scope，parent_ctx 用于 inherit_parent=True 的场景。"""
+        ctx = build_ctx(scope, parent_ctx)
+        await self._run_workflow(scope.workflow, ctx)
+        return ctx
+```
+
+### 7.2 Kahn 算法 + Wave 并发
 
 ```mermaid
 flowchart TD
     S([开始]) --> INIT[构建 successors 与 in_degree\n将入度为 0 的节点入队]
     INIT --> LOOP{completed < total?}
     LOOP -- 否 --> END([返回 ctx])
-    LOOP -- 是 --> DRAIN[_drain_skipped\n批量完成已标记为跳过的就绪节点]
-    DRAIN --> COLLECT[收集本轮 wave\n就绪且未跳过的节点]
+    LOOP -- 是 --> COLLECT[收集本轮 wave：就绪节点]
     COLLECT --> HAS_WAVE{wave 非空?}
     HAS_WAVE -- 是 --> GATHER[asyncio.gather 并发执行 wave]
-    GATHER --> UPDATE[更新 completed\n递减后继入度\n入度归零者入队]
+    GATHER --> SCOPE{节点返回 ScopeGroup?}
+    SCOPE -- 是 --> RUN_SG[按模式调度 ScopeGroup\n将 outputs 写回 ctx]
+    SCOPE -- 否 --> UPDATE
+    RUN_SG --> UPDATE[更新 completed\n递减后继入度\n入度归零者入队]
     UPDATE --> LOOP
-    HAS_WAVE -- 否 --> HAS_SKIP{仍有跳过节点?}
-    HAS_SKIP -- 是 --> SKIP_UP[完成跳过节点\n传播入度更新]
-    SKIP_UP --> LOOP
-    HAS_SKIP -- 否 --> END
+    HAS_WAVE -- 否 --> END
 ```
 
-**关键数据结构：**
-
-```
-nodes_by_id  : dict[str, NodeDef]       — O(1) 按 ID 查节点
-successors   : dict[str, list[str]]      — node_id → 下游节点 ID 列表
-in_degree    : dict[str, int]            — 各节点当前未完成前置数量
-ready        : deque[str]                — 入度为 0 的节点队列（FIFO）
-completed    : set[str]                  — 已完成节点（含跳过）
-```
-
-### 6.2 _drain_skipped：不动点迭代
+### 7.3 ScopeGroup 调度
 
 ```python
-changed = True
-while changed:
-    changed = False
-    skipped = [nid for nid in ready if ctx.is_skipped(nid) and nid not in completed]
-    for nid in skipped:
-        ready.remove(nid)
-        completed.add(nid)
-        for succ in successors[nid]:
-            in_degree[succ] -= 1
-            if in_degree[succ] == 0:
-                ready.append(succ)
-                changed = True  # 有新节点就绪，继续扫描
+async def _run_scope_group(
+    self, group: ScopeGroup, parent_ctx: RunContext
+) -> None:
+    match group.mode:
+        case "exclusive":
+            await self._run_exclusive(group, parent_ctx)
+        case "parallel":
+            await self._run_parallel(group, parent_ctx)
+        case "sequential":
+            await self._run_sequential(group, parent_ctx)
+        case "pooled":
+            await self._run_pooled(group, parent_ctx)
 ```
 
-这一步是**不动点迭代（fixed-point iteration）**：反复扫描直到没有新的 skipped 节点出现。确保 condition 节点的 BFS 标记能在同一 wave 循环内快速传播到所有下游节点，不引入额外 wave 延迟。
+各模式的核心逻辑：
 
-### 6.3 异常处理策略
+- **exclusive**：顺序运行 `group.scopes`（节点已预选，通常只有一个），将 outputs 提升至 `parent_ctx`
+- **parallel**：`asyncio.gather` 并发运行所有 Scope；outputs 键名冲突时抛 `ScopeOutputConflictError`
+- **sequential**（非 repeat）：顺序运行，每轮 outputs 注入下一个 Scope 的 inputs；最后一个 Scope 的 outputs 提升至 `parent_ctx`
+- **sequential + repeat**：反复运行同一 Scope，每轮 outputs 提升至 `parent_ctx`，然后检查 `repeat_until(parent_ctx)`；超出 `max_iterations` 时抛 `MaxIterationsExceeded`
+- **pooled**：semaphore 限流的并发；每个 Scope 的 outputs 收集到 `parent_ctx[group.collect_key]` 列表
+
+### 7.4 异常处理策略
 
 ```mermaid
 flowchart LR
     CALL[executor.execute] --> EXC{抛出异常?}
     EXC -- 无异常 --> OK([正常返回])
     EXC -- DAGEngineError 子类 --> RERAISE([直接 raise 透传])
-    EXC -- 其他 Exception --> WRAP([包装为 NodeExecutionError\nnode_id + cause])
+    EXC -- 其他 Exception --> WRAP([包装为 NodeExecutionError])
 ```
-
-区分"引擎内部预期异常"和"节点业务异常"，上层可以按类型选择性捕获。
 
 ---
 
-## 7. 四种内置节点的行为细节
+## 8. 四种内置节点的行为细节
 
-### 7.1 ActionNode
+### 8.1 ActionNode
 
 ```
 resolve($ref) → registry.call(handler, params) → ctx.set("{id}.{output_key}", result)
+返回 None（不创建 Scope）
 ```
 
-最简单的节点，无分支影响，`graph` 参数未使用。
+### 8.2 ConditionNode
 
-### 7.2 ConditionNode — BFS 级联跳过
-
-```mermaid
-flowchart TD
-    CALL["registry.call(handler, params)"] --> BOOL{result 转 bool}
-    BOOL -- true --> CHOSEN_T["chosen = branches['true']"]
-    BOOL -- false --> CHOSEN_F["chosen = branches['false']"]
-    CHOSEN_T --> UNCHOSEN[unchosen = 另一侧分支节点]
-    CHOSEN_F --> UNCHOSEN
-    UNCHOSEN --> BFS_INIT["queue = deque(unchosen)"]
-    BFS_INIT --> BFS{queue 非空?}
-    BFS -- 是 --> BFS_STEP["nid = queue.popleft()\nctx.mark_skipped(nid)\nqueue.extend(graph[nid])"]
-    BFS_STEP --> BFS
-    BFS -- 否 --> DONE([跳过标记传播完毕])
-```
-
-**为什么用 BFS 而非 DFS？** 两者效果等价（只是遍历顺序不同），BFS 用 `deque` 实现更直观，且标记顺序与后续 drain 顺序一致，便于调试。
-
-### 7.3 ForEachNode — 子上下文隔离
+handler 返回分支键（字符串），节点从 `branches` 中取出对应 `WorkflowDef`，创建一个 `inherit_parent=True` 的 Scope，打包为 `exclusive` ScopeGroup 返回：
 
 ```python
-items = ctx.resolve(node.items)        # 解析 $ref → 实际列表
-for item in items:                      # 顺序迭代，不并发
-    sub_ctx = ctx.child(**{node.item_var: item})  # 独立副本，继承父变量
-    await DAGExecutor(node.sub_workflow, registry).run(sub_ctx)
-    if node.collect_key:
-        collected.append(sub_ctx.get(node.collect_key, None))
-if node.collect_key:
-    ctx.set(f"{node.id}.collected", collected)
+branch_key = str(await registry.call(node.handler, resolved_params))
+chosen_workflow = node.branches[branch_key]   # 支持任意数量具名分支
+
+scope = Scope(
+    inputs={},                    # 无额外绑定
+    inherit_parent=True,          # 继承父上下文全部变量
+    outputs=node.outputs,         # 显式声明写回父上下文的变量
+    workflow=chosen_workflow,
+)
+return ScopeGroup(scopes=[scope], mode="exclusive")
 ```
 
-**collect_key None 占位**：保证 `collected` 列表长度与 `items` 长度一致，方便上游 zip 对应。
+**与原设计的对比：**
+- 不再需要 BFS 级联标记跳过节点——未选中分支从不创建 Scope，自然不执行
+- 菱形汇聚问题消失——Scope 执行完后统一在边界处写回，不存在"跳过传播"的问题
+- 支持任意数量分支（`branches` 是 dict，不限于 true/false）
 
-**延迟导入**：`foreach.py` 和 `while_.py` 在 `execute()` 内部导入 `DAGExecutor`，避免 `executor.py ↔ nodes/` 的循环导入。
+### 8.3 ForEachNode
 
-### 7.4 WhileNode — 共享上下文 + 上界保护
+为每个 item 创建独立 Scope，打包为 `pooled` ScopeGroup：
 
 ```python
-for _ in range(node.max_iterations):
-    if not ctx.eval_condition(node.condition):
-        return                          # 正常退出
-    await DAGExecutor(node.sub_workflow, registry).run(ctx)  # 共享 ctx！
-raise MaxIterationsExceeded(node.id, node.max_iterations)
+items = ctx.resolve(node.items)
+scopes = [
+    Scope(
+        inputs={node.item_var: item},
+        inherit_parent=False,     # 完全隔离，防止迭代间变量污染
+        outputs=[node.collect_key],
+        workflow=node.sub_workflow,
+    )
+    for item in items
+]
+return ScopeGroup(
+    scopes=scopes,
+    mode="pooled",
+    concurrency=node.concurrency,       # None 表示不限并发
+    collect_key=f"{node.id}.collected", # 父上下文中收集结果的目标键
+)
 ```
 
-**为什么 while 共享 ctx 而 foreach 用子上下文？**
+每个 Scope 执行后，`node.collect_key` 对应的值按顺序收集为父上下文 `{node.id}.collected` 的列表。
 
-- `while` 的语义是"直到条件为假"，子工作流必须能修改触发条件的变量（如 `$count`），否则循环永远不会退出。
-- `foreach` 的语义是"对每个元素执行相同操作"，各次迭代逻辑上独立，不应互相干扰。
+**pooled 模式的单键约束**：pooled 模式下每个 Scope 只允许声明一个 outputs 键，违反时在校验阶段抛 `ScopeConfigError`。若子工作流需要输出多个值，应将其打包为单个结构体（dict）写入 `output_key`。
+
+### 8.4 WhileNode
+
+创建一个 `sequential + repeat` 的 ScopeGroup，引擎在每轮执行后检查终止条件：
+
+```python
+scope = Scope(
+    inputs={},
+    inherit_parent=True,              # 循环体需要读取并修改父上下文的变量
+    outputs=node.outputs,             # 声明循环体哪些写入会影响父上下文（含条件变量）
+    workflow=node.sub_workflow,
+)
+return ScopeGroup(
+    scopes=[scope],
+    mode="sequential",
+    repeat=True,
+    repeat_until=lambda ctx: not ctx.eval_condition(node.condition),
+    max_iterations=node.max_iterations,
+)
+```
+
+**为什么 while 使用 `inherit_parent=True`？**
+循环体需要修改触发条件的变量（如 `$count`）并将其写回父上下文，否则条件永远不变，循环无法退出。通过 `outputs` 显式声明哪些变量写回，防止意外污染其他父上下文变量。
 
 ---
 
-## 8. 静态校验管道
+## 9. 静态校验管道
 
-在工作流进入执行前，`validate_workflow()` 按顺序运行四项检查：
+`validate_workflow()` 在执行前按顺序运行以下检查：
 
 ```mermaid
 flowchart LR
-    WF([WorkflowDef]) --> C1["① 节点 ID 唯一性检查"]
-    C1 --> C2["② Kahn 环检测\n验证 depends_on 引用合法"]
-    C2 --> C3["③ condition 分支目标存在\n递归校验子工作流"]
-    C3 --> C4["④ while condition 表达式\n符合受限 DSL 语法"]
-    C4 --> OK([通过])
+    WF([WorkflowDef]) --> C1["① 节点 ID 唯一性"]
+    C1 --> C2["② Kahn 环检测"]
+    C2 --> C3["③ condition 分支目标 WorkflowDef 存在且合法"]
+    C3 --> C4["④ while condition 表达式符合受限 DSL"]
+    C4 --> C5["⑤ Scope outputs 引用的变量键在子工作流中确实存在"]
+    C5 --> OK([通过])
 
     C1 -- 失败 --> ERR([WorkflowValidationError])
     C2 -- 失败 --> ERR
     C3 -- 失败 --> ERR
     C4 -- 失败 --> ERR
+    C5 -- 失败 --> ERR
 ```
 
-`_check_branch_targets` 和 `_check_no_cycles` 均对 foreach/while 的 `sub_workflow` 递归调用 `validate_workflow`，保证嵌套工作流也经过完整校验。
+新增第 ⑤ 步：校验 `outputs` 中声明的变量键是否能在对应子工作流中被某个节点写入，防止"声明了 output 但子工作流里没有节点产生该变量"的静默错误。
+
+所有检查均对 `sub_workflow` 递归执行。
 
 ---
 
-## 9. ActionRegistry：外部动作扩展接口
+## 10. ActionRegistry：外部动作扩展接口
 
-`ActionRegistry` 是引擎与外部系统之间的**唯一边界**。引擎只通过 `registry.call(handler, params)` 发起调用，不感知背后的实现细节。
-
-```mermaid
-classDiagram
-    class ActionRegistry {
-        -_handlers: dict
-        +register(name, handler)
-        +call(handler_name, params) Any
-    }
-    class NodeExecutor {
-        <<abstract>>
-        +execute(node, ctx, registry, graph)
-    }
-    class ActionNodeExecutor {
-        +execute(node, ctx, registry, graph)
-    }
-    class ConditionNodeExecutor {
-        +execute(node, ctx, registry, graph)
-    }
-    NodeExecutor <|-- ActionNodeExecutor
-    NodeExecutor <|-- ConditionNodeExecutor
-    ActionNodeExecutor ..> ActionRegistry : registry.call()
-    ConditionNodeExecutor ..> ActionRegistry : registry.call()
-```
-
-### 9.1 接口定义
+`ActionRegistry` 是引擎与外部系统之间的**唯一边界**，设计不变。
 
 ```python
-from typing import Any, Callable, Awaitable
-
 class ActionRegistry:
-    """引擎的外部动作注册表。业务侧向此注册异步处理函数，引擎通过名称调用。"""
-
     def __init__(self) -> None:
         self._handlers: dict[str, Callable[..., Awaitable[Any]]] = {}
 
     def register(self, name: str, handler: Callable[..., Awaitable[Any]]) -> None:
-        """注册一个处理函数。name 对应工作流节点中的 handler 字段。"""
         self._handlers[name] = handler
 
     async def call(self, handler_name: str, params: dict) -> Any:
-        """按名称调用已注册的处理函数，将 params 展开为关键字参数。"""
         fn = self._handlers.get(handler_name)
         if fn is None:
             raise UnknownHandlerError(handler_name)
         return await fn(**params)
 ```
 
-### 9.2 注册方式
-
-支持直接注册异步函数，也支持装饰器风格：
+注册方式：
 
 ```python
 registry = ActionRegistry()
 
-# 方式一：直接注册
-async def fetch(url: str) -> dict:
-    async with httpx.AsyncClient() as client:
-        return (await client.get(url)).json()
-
+# 直接注册
 registry.register("http.get", fetch)
 
-# 方式二：装饰器（可自行封装）
+# 装饰器风格
 def action(name: str):
     def decorator(fn):
         registry.register(name, fn)
@@ -541,95 +581,69 @@ async def process(data: dict) -> dict:
 
 ---
 
-## 10. 接入方式示例
+## 11. 接入方式示例
 
-### 10.1 完整接入流程
+### 11.1 完整接入流程
 
 ```python
-import asyncio
-import json
-from dagengine import DAGExecutor, WorkflowDef, ActionRegistry
-from dagengine.schema.validators import validate_workflow
+import asyncio, json
+from okflow import DAGExecutor, WorkflowDef, ActionRegistry, Scope
+from okflow.schema.validators import validate_workflow
 
-# 1. 创建注册表，注册业务处理函数
 registry = ActionRegistry()
 
 @action("data.fetch")
-async def fetch_data(source: str) -> list:
-    ...
+async def fetch_data(source: str) -> list: ...
 
 @action("data.transform")
-async def transform(item: dict) -> dict:
-    ...
+async def transform(item: dict) -> dict: ...
 
-@action("builtin.is_truthy")
-async def is_truthy(value) -> bool:
-    return bool(value)
+@action("builtin.is_nonempty")
+async def is_nonempty(value) -> str:
+    return "true" if value else "false"
 
-# 2. 加载工作流定义
+# 加载并校验
 with open("workflow.json") as f:
-    workflow = WorkflowDef.from_dict(json.load(f))
+    workflow = WorkflowDef.model_validate(json.load(f))
+validate_workflow(workflow)
 
-validate_workflow(workflow)   # 静态校验，失败时抛 WorkflowValidationError
-
-# 3. 执行
+# 执行
 async def main():
-    ctx = await DAGExecutor(workflow, registry).run()
-    print(ctx.get("process_each.collected"))
+    root_scope = Scope(
+        inputs={"source": "https://api.example.com/items"},
+        inherit_parent=False,
+        outputs=["foreach_node.collected"],
+        workflow=workflow,
+    )
+    ctx = await DAGExecutor(registry).run(root_scope)
+    print(ctx.get("foreach_node.collected"))
 
 asyncio.run(main())
 ```
 
-### 10.2 层次关系
-
-```mermaid
-graph LR
-    subgraph app ["业务应用（接入方）"]
-        A[应用代码]
-        R[ActionRegistry\n注册业务 handlers]
-        W[workflow.json]
-    end
-
-    subgraph lib ["dag-engine 库"]
-        V[validate_workflow]
-        E[DAGExecutor]
-        N[NodeExecutors]
-        C[RunContext]
-    end
-
-    A --> R
-    A --> W
-    W --> V --> E
-    R --> E
-    E --> N
-    E --> C
-    N -- "registry.call()" --> R
-```
-
-### 10.3 异常处理
+### 11.2 异常处理
 
 ```python
-from dagengine.exceptions import (
+from okflow.exceptions import (
     DAGEngineError,
     WorkflowValidationError,
     NodeExecutionError,
     MaxIterationsExceeded,
     UnknownHandlerError,
+    ScopeOutputConflictError,
 )
 
 try:
-    ctx = await DAGExecutor(workflow, registry).run()
+    ctx = await DAGExecutor(registry).run(root_scope)
 except WorkflowValidationError as e:
-    # 工作流定义本身有问题（环、重复 ID 等）
     print(f"工作流配置错误: {e}")
 except MaxIterationsExceeded as e:
-    # while 节点超出最大迭代次数
     print(f"节点 {e.node_id} 超出最大迭代次数 {e.max_iterations}")
 except NodeExecutionError as e:
-    # 某个节点的业务逻辑抛出了异常
     print(f"节点 {e.node_id} 执行失败: {e.cause}")
+except ScopeOutputConflictError as e:
+    print(f"parallel 模式 outputs 键名冲突: {e.key}")
 except DAGEngineError as e:
-    # 其他引擎级别错误
     print(f"引擎错误: {e}")
 ```
 
@@ -639,9 +653,7 @@ except DAGEngineError as e:
 
 ```mermaid
 classDiagram
-    class DAGEngineError {
-        <<base>>
-    }
+    class DAGEngineError { <<base>> }
     class WorkflowValidationError
     class NodeExecutionError {
         +node_id: str
@@ -654,10 +666,18 @@ classDiagram
     class UnknownHandlerError {
         +handler_name: str
     }
+    class ScopeOutputConflictError {
+        +key: str
+    }
+    class ScopeConfigError {
+        +reason: str
+    }
     DAGEngineError <|-- WorkflowValidationError
     DAGEngineError <|-- NodeExecutionError
     DAGEngineError <|-- MaxIterationsExceeded
     DAGEngineError <|-- UnknownHandlerError
+    DAGEngineError <|-- ScopeOutputConflictError
+    DAGEngineError <|-- ScopeConfigError
 ```
 
-`DAGEngineError` 子类在 `_execute_one` 中直接透传，非引擎异常包装为 `NodeExecutionError`。调用方可以用 `except DAGEngineError` 统一捕获引擎级别的失败，也可以单独捕获 `NodeExecutionError` 处理节点业务失败。
+`DAGEngineError` 子类在节点执行时直接透传，非引擎异常包装为 `NodeExecutionError`。新增 `ScopeOutputConflictError`，用于 `parallel` 模式下多个 Scope 写入同一 outputs 键的场景。

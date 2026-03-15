@@ -1,0 +1,99 @@
+{
+  "id": "grade_pipeline",
+  "name": "学生成绩批量处理",
+  "nodes": [
+    {
+      "type": "action",
+      "id": "fetch",
+      "handler": "scores.fetch",
+      "params": {},
+      "output_key": "data"
+    },
+    {
+      "type": "foreach",
+      "id": "grade_each",
+      "items": "$fetch.data",
+      "item_var": "score",
+      "collect_key": "grade.letter",
+      "concurrency": 2,
+      "sub_workflow": {
+        "id": "grade_sub",
+        "name": "打等级",
+        "nodes": [
+          {
+            "type": "action",
+            "id": "grade",
+            "handler": "scores.grade",
+            "params": { "score": "$score" },
+            "output_key": "letter"
+          }
+        ],
+        "edges": []
+      }
+    },
+    {
+      "type": "condition",
+      "id": "check",
+      "handler": "scores.check_pass_rate",
+      "params": { "grades": "$grade_each.collected" },
+      "branches": {
+        "low": {
+          "id": "low_wf",
+          "name": "及格率偏低处理",
+          "nodes": [
+            {
+              "type": "action",
+              "id": "notify_admin",
+              "handler": "admin.notify",
+              "params": {},
+              "output_key": "done"
+            },
+            {
+              "type": "while",
+              "id": "poll_ack",
+              "condition": "$poll.status != 'acked'",
+              "outputs": ["poll.status"],
+              "max_iterations": 3,
+              "sub_workflow": {
+                "id": "poll_sub",
+                "name": "单次轮询",
+                "nodes": [
+                  {
+                    "type": "action",
+                    "id": "poll",
+                    "handler": "admin.poll_status",
+                    "params": {},
+                    "output_key": "status"
+                  }
+                ],
+                "edges": []
+              }
+            }
+          ],
+          "edges": [
+            { "from": "notify_admin", "to": "poll_ack" }
+          ]
+        },
+        "ok": {
+          "id": "ok_wf",
+          "name": "及格率正常处理",
+          "nodes": [
+            {
+              "type": "action",
+              "id": "report",
+              "handler": "scores.publish_report",
+              "params": { "grades": "$grade_each.collected" },
+              "output_key": "done"
+            }
+          ],
+          "edges": []
+        }
+      },
+      "outputs": ["poll.status", "report.done"]
+    }
+  ],
+  "edges": [
+    { "from": "fetch", "to": "grade_each" },
+    { "from": "grade_each", "to": "check" }
+  ]
+}

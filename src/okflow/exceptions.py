@@ -21,9 +21,7 @@ class MaxIterationsExceeded(DAGEngineError):
     def __init__(self, node_id: str, max_iterations: int) -> None:
         self.node_id = node_id
         self.max_iterations = max_iterations
-        super().__init__(
-            f"Node {node_id!r} exceeded max iterations ({max_iterations})"
-        )
+        super().__init__(f"Node {node_id!r} exceeded max iterations ({max_iterations})")
 
 
 class UnknownHandlerError(DAGEngineError):

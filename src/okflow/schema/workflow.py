@@ -20,12 +20,17 @@ class EdgeDef(BaseModel):
 class WorkflowDef(BaseModel):
     id: str
     name: str
-    nodes: list[Annotated[Union[
-        "ActionNodeDef",
-        "ConditionNodeDef",
-        "ForEachNodeDef",
-        "WhileNodeDef",
-    ], Field(discriminator="type")]]
+    nodes: list[
+        Annotated[
+            Union[
+                "ActionNodeDef",
+                "ConditionNodeDef",
+                "ForEachNodeDef",
+                "WhileNodeDef",
+            ],
+            Field(discriminator="type"),
+        ]
+    ]
     edges: list[EdgeDef]
 
 

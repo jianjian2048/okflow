@@ -1,6 +1,7 @@
 import pytest
-from okflow.registry import ActionRegistry
+
 from okflow.exceptions import UnknownHandlerError
+from okflow.registry import ActionRegistry
 
 
 async def test_register_and_call():

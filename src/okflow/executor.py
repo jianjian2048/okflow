@@ -12,8 +12,8 @@ from okflow.exceptions import (
     ScopeOutputConflictError,
 )
 from okflow.registry import ActionRegistry
-from okflow.scope import Scope, ScopeGroup
 from okflow.schema.workflow import WorkflowDef
+from okflow.scope import Scope, ScopeGroup
 
 
 def build_ctx(scope: Scope, parent_ctx: RunContext) -> RunContext:
@@ -108,19 +108,13 @@ class DAGExecutor:
             case "pooled":
                 await self._run_pooled(group, parent_ctx)
 
-    async def _run_exclusive(
-        self, group: ScopeGroup, parent_ctx: RunContext
-    ) -> None:
+    async def _run_exclusive(self, group: ScopeGroup, parent_ctx: RunContext) -> None:
         for scope in group.scopes:
             child_ctx = await self.run_with_parent(scope, parent_ctx)
             _write_back(scope.outputs, child_ctx, parent_ctx)
 
-    async def _run_parallel(
-        self, group: ScopeGroup, parent_ctx: RunContext
-    ) -> None:
-        child_ctxs = await asyncio.gather(
-            *[self.run_with_parent(scope, parent_ctx) for scope in group.scopes]
-        )
+    async def _run_parallel(self, group: ScopeGroup, parent_ctx: RunContext) -> None:
+        child_ctxs = await asyncio.gather(*[self.run_with_parent(scope, parent_ctx) for scope in group.scopes])
         written: set[str] = set()
         for scope, child_ctx in zip(group.scopes, child_ctxs):
             for key in scope.outputs:
@@ -163,9 +157,7 @@ class DAGExecutor:
             if group.repeat_until is not None and group.repeat_until(parent_ctx):
                 break
 
-    async def _run_pipeline(
-        self, group: ScopeGroup, parent_ctx: RunContext
-    ) -> None:
+    async def _run_pipeline(self, group: ScopeGroup, parent_ctx: RunContext) -> None:
         """sequential（非 repeat）：pipeline 语义，前一个 outputs 注入下一个 inputs。"""
         extra_inputs: dict[str, Any] = {}
         last_idx = len(group.scopes) - 1
@@ -184,16 +176,12 @@ class DAGExecutor:
             else:
                 extra_inputs = {k: child_ctx.get(k) for k in scope.outputs}
 
-    async def _run_pooled(
-        self, group: ScopeGroup, parent_ctx: RunContext
-    ) -> None:
+    async def _run_pooled(self, group: ScopeGroup, parent_ctx: RunContext) -> None:
         """pooled：并发执行，结果收集为列表。"""
         # 运行时防守：pooled 模式每个 Scope 必须恰好声明 1 个 output 键
         for scope in group.scopes:
             if len(scope.outputs) != 1:
-                raise ScopeConfigError(
-                    f"pooled scope must declare exactly one output, got {scope.outputs}"
-                )
+                raise ScopeConfigError(f"pooled scope must declare exactly one output, got {scope.outputs}")
 
         sem = asyncio.Semaphore(group.concurrency) if group.concurrency else None
 
@@ -215,9 +203,7 @@ class DAGExecutor:
         parent_ctx.set(group.collect_key, collected)
 
 
-def _write_back(
-    outputs: list[str], child_ctx: RunContext, parent_ctx: RunContext
-) -> None:
+def _write_back(outputs: list[str], child_ctx: RunContext, parent_ctx: RunContext) -> None:
     """将子上下文的指定 outputs 键写回父上下文。跳过子上下文中不存在的键（如条件分支未执行的输出）。"""
     snapshot = child_ctx.snapshot()
     for key in outputs:

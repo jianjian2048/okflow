@@ -1,5 +1,5 @@
-from okflow.scope import Scope, ScopeGroup
 from okflow.schema.workflow import WorkflowDef
+from okflow.scope import Scope, ScopeGroup
 
 
 def _empty_wf(wf_id: str = "wf") -> WorkflowDef:

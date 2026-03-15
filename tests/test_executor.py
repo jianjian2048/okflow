@@ -1,20 +1,23 @@
 import pytest
-from okflow.executor import DAGExecutor, build_ctx
+
 from okflow.context import RunContext
-from okflow.scope import Scope, ScopeGroup
-from okflow.schema.workflow import WorkflowDef, EdgeDef
-from okflow.schema.nodes import ActionNodeDef
+from okflow.exceptions import (
+    NodeExecutionError,
+    ScopeOutputConflictError,
+)
+from okflow.executor import DAGExecutor, build_ctx
 from okflow.registry import ActionRegistry
-from okflow.exceptions import NodeExecutionError, MaxIterationsExceeded, ScopeOutputConflictError
+from okflow.schema.nodes import ActionNodeDef
+from okflow.schema.workflow import EdgeDef, WorkflowDef
+from okflow.scope import Scope, ScopeGroup
 
 
 def _wf(wf_id: str = "wf", nodes=None, edges=None) -> WorkflowDef:
-    return WorkflowDef(
-        id=wf_id, name="test", nodes=nodes or [], edges=edges or []
-    )
+    return WorkflowDef(id=wf_id, name="test", nodes=nodes or [], edges=edges or [])
 
 
 # ── build_ctx ─────────────────────────────────────────────────────────────────
+
 
 def test_build_ctx_no_inherit():
     parent = RunContext({"parent_var": "parent"})
@@ -47,6 +50,7 @@ def test_build_ctx_empty_parent():
 
 # ── single action ─────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_executor_single_action_node():
     registry = ActionRegistry()
@@ -66,6 +70,7 @@ async def test_executor_single_action_node():
 
 
 # ── sequential chain ──────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_executor_sequential_nodes():
@@ -96,6 +101,7 @@ async def test_executor_sequential_nodes():
 
 # ── parallel nodes ────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_executor_parallel_nodes():
     registry = ActionRegistry()
@@ -121,6 +127,7 @@ async def test_executor_parallel_nodes():
 
 # ── exception wrapping ────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_executor_wraps_node_exception():
     registry = ActionRegistry()
@@ -141,6 +148,7 @@ async def test_executor_wraps_node_exception():
 
 
 # ── parallel output conflict ──────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_executor_parallel_output_conflict_raises():

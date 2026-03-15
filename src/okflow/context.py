@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-
 _REF_PATTERN = re.compile(r"^\$([a-zA-Z_][\w.]*)$")
 _CONDITION_IS_NULL = re.compile(r"^\$(\S+)\s+is\s+null$")
 _CONDITION_IS_NOT_NULL = re.compile(r"^\$(\S+)\s+is\s+not\s+null$")
@@ -65,9 +64,7 @@ def _parse_rhs(raw: str) -> Any:
         return True
     if raw == "false":
         return False
-    if (raw.startswith('"') and raw.endswith('"')) or (
-        raw.startswith("'") and raw.endswith("'")
-    ):
+    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
         return raw[1:-1]
     try:
         return int(raw)

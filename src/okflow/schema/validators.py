@@ -3,13 +3,16 @@ from __future__ import annotations
 import re
 
 from okflow.exceptions import WorkflowValidationError
-from okflow.schema.nodes import ActionNodeDef, ConditionNodeDef, ForEachNodeDef, WhileNodeDef
+from okflow.schema.nodes import (
+    ActionNodeDef,
+    ConditionNodeDef,
+    ForEachNodeDef,
+    WhileNodeDef,
+)
 from okflow.schema.workflow import WorkflowDef
 
 # 合法的条件表达式正则（必须以 $ 开头）
-_VALID_CONDITION = re.compile(
-    r"^\$\S+\s+(is\s+null|is\s+not\s+null|(==|!=|<=|>=|<|>)\s+.+)$"
-)
+_VALID_CONDITION = re.compile(r"^\$\S+\s+(is\s+null|is\s+not\s+null|(==|!=|<=|>=|<|>)\s+.+)$")
 
 
 def validate_workflow(workflow: WorkflowDef) -> None:
@@ -24,9 +27,7 @@ def validate_workflow(workflow: WorkflowDef) -> None:
 def _check_unique_ids(workflow: WorkflowDef) -> None:
     ids = [n.id for n in workflow.nodes]
     if len(ids) != len(set(ids)):
-        raise WorkflowValidationError(
-            f"Duplicate node IDs in workflow {workflow.id!r}: {ids}"
-        )
+        raise WorkflowValidationError(f"Duplicate node IDs in workflow {workflow.id!r}: {ids}")
     for node in workflow.nodes:
         if isinstance(node, ConditionNodeDef):
             for branch_wf in node.branches.values():
@@ -42,9 +43,7 @@ def _check_no_cycle(workflow: WorkflowDef) -> None:
 
     for edge in workflow.edges:
         if edge.from_ not in node_ids or edge.to not in node_ids:
-            raise WorkflowValidationError(
-                f"Edge references unknown node: {edge.from_!r} -> {edge.to!r}"
-            )
+            raise WorkflowValidationError(f"Edge references unknown node: {edge.from_!r} -> {edge.to!r}")
         successors[edge.from_].append(edge.to)
         in_degree[edge.to] += 1
 
@@ -59,9 +58,7 @@ def _check_no_cycle(workflow: WorkflowDef) -> None:
                 queue.append(succ)
 
     if visited != len(node_ids):
-        raise WorkflowValidationError(
-            f"Cycle detected in workflow {workflow.id!r}"
-        )
+        raise WorkflowValidationError(f"Cycle detected in workflow {workflow.id!r}")
 
     for node in workflow.nodes:
         if isinstance(node, ConditionNodeDef):
@@ -85,8 +82,7 @@ def _check_while_conditions(workflow: WorkflowDef) -> None:
         if isinstance(node, WhileNodeDef):
             if not _VALID_CONDITION.match(node.condition.strip()):
                 raise WorkflowValidationError(
-                    f"Invalid while condition expression in node {node.id!r}: "
-                    f"{node.condition!r}. Must start with $ref."
+                    f"Invalid while condition expression in node {node.id!r}: {node.condition!r}. Must start with $ref."
                 )
             _check_while_conditions(node.sub_workflow)
         elif isinstance(node, ConditionNodeDef):

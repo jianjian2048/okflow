@@ -12,7 +12,7 @@ class ActionNodeDef(BaseModel):
     type: Literal["action"] = "action"
     id: str
     handler: str
-    params: dict = Field(default_factory=dict)
+    params: dict[str, object] = Field(default_factory=dict)
     output_key: str
 
 
@@ -20,7 +20,7 @@ class ConditionNodeDef(BaseModel):
     type: Literal["condition"] = "condition"
     id: str
     handler: str
-    params: dict = Field(default_factory=dict)
+    params: dict[str, object] = Field(default_factory=dict)
     branches: dict[str, "WorkflowDef"]
     outputs: list[str] = Field(default_factory=list)
 
@@ -53,8 +53,9 @@ NodeDef = Annotated[
 
 def _rebuild_all() -> None:
     """解析所有前向引用（在 workflow.py 末尾导入本模块后调用）。"""
-    from okflow.schema.workflow import WorkflowDef  # noqa: PLC0415
+    from okflow.schema.workflow import WorkflowDef  # noqa: PLC0415, F401
 
-    ConditionNodeDef.model_rebuild()
-    ForEachNodeDef.model_rebuild()
-    WhileNodeDef.model_rebuild()
+    ns = {"WorkflowDef": WorkflowDef}
+    ConditionNodeDef.model_rebuild(_types_namespace=ns)
+    ForEachNodeDef.model_rebuild(_types_namespace=ns)
+    WhileNodeDef.model_rebuild(_types_namespace=ns)

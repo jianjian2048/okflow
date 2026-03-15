@@ -2,19 +2,20 @@
 端到端集成测试：覆盖四种节点类型和多种组合场景。
 测试通过 okflow 公开 API 驱动，不依赖内部实现细节。
 """
+
 import pytest
+
 from okflow import (
     ActionNodeDef,
+    ActionRegistry,
     ConditionNodeDef,
     DAGExecutor,
     EdgeDef,
     ForEachNodeDef,
-    ActionRegistry,
+    MaxIterationsExceeded,
     Scope,
     WhileNodeDef,
     WorkflowDef,
-    MaxIterationsExceeded,
-    NodeExecutionError,
     validate_workflow,
 )
 
@@ -24,6 +25,7 @@ def _wf(wf_id: str, nodes=None, edges=None) -> WorkflowDef:
 
 
 # ── 场景 1：action 节点链 ────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_integration_action_chain():
@@ -44,7 +46,9 @@ async def test_integration_action_chain():
     registry.register("data.summarize", summarize)
 
     n_fetch = ActionNodeDef(id="fetch", handler="data.fetch", params={"source": "db"}, output_key="items")
-    n_transform = ActionNodeDef(id="transform", handler="data.transform", params={"items": "$fetch.items"}, output_key="items")
+    n_transform = ActionNodeDef(
+        id="transform", handler="data.transform", params={"items": "$fetch.items"}, output_key="items"
+    )
     n_sum = ActionNodeDef(id="sum", handler="data.summarize", params={"items": "$transform.items"}, output_key="total")
 
     workflow = _wf(
@@ -60,6 +64,7 @@ async def test_integration_action_chain():
 
 
 # ── 场景 2：condition 节点 ───────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_integration_condition_true_branch():
@@ -136,6 +141,7 @@ async def test_integration_condition_false_branch():
 
 # ── 场景 3：foreach 节点（并发 + 结果收集）─────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_integration_foreach_collects_results():
     registry = ActionRegistry()
@@ -193,6 +199,7 @@ async def test_integration_foreach_with_concurrency_limit():
 
 
 # ── 场景 4：while 节点 ───────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_integration_while_correct():
@@ -269,6 +276,7 @@ async def test_integration_while_max_iterations_exceeded():
 
 
 # ── 场景 5：混合工作流（action + condition + foreach）────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_integration_mixed_workflow():

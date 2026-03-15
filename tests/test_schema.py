@@ -1,16 +1,16 @@
 import pytest
 from pydantic import ValidationError
-from okflow.schema.workflow import WorkflowDef, EdgeDef
+
 from okflow.schema.nodes import (
     ActionNodeDef,
     ConditionNodeDef,
     ForEachNodeDef,
     WhileNodeDef,
-    NodeDef,
 )
-
+from okflow.schema.workflow import EdgeDef, WorkflowDef
 
 # ── EdgeDef ──────────────────────────────────────────────────────────────────
+
 
 def test_edge_def_from_alias():
     """EdgeDef 使用 "from" 作为 JSON 字段名。"""
@@ -27,6 +27,7 @@ def test_edge_def_python_name():
 
 # ── ActionNodeDef ─────────────────────────────────────────────────────────────
 
+
 def test_action_node_def_basic():
     node = ActionNodeDef(id="n1", handler="data.fetch", output_key="body")
     assert node.type == "action"
@@ -35,13 +36,12 @@ def test_action_node_def_basic():
 
 
 def test_action_node_def_with_params():
-    node = ActionNodeDef(
-        id="n1", handler="data.fetch", params={"url": "$src.url"}, output_key="body"
-    )
+    node = ActionNodeDef(id="n1", handler="data.fetch", params={"url": "$src.url"}, output_key="body")
     assert node.params == {"url": "$src.url"}
 
 
 # ── ConditionNodeDef ──────────────────────────────────────────────────────────
+
 
 def test_condition_node_def():
     branch_wf = WorkflowDef(id="branch", name="b", nodes=[], edges=[])
@@ -57,6 +57,7 @@ def test_condition_node_def():
 
 
 # ── ForEachNodeDef ────────────────────────────────────────────────────────────
+
 
 def test_foreach_node_def():
     sub_wf = WorkflowDef(id="sub", name="s", nodes=[], edges=[])
@@ -86,6 +87,7 @@ def test_foreach_node_def_with_concurrency():
 
 # ── WhileNodeDef ──────────────────────────────────────────────────────────────
 
+
 def test_while_node_def():
     sub_wf = WorkflowDef(id="sub", name="s", nodes=[], edges=[])
     node = WhileNodeDef(
@@ -101,14 +103,13 @@ def test_while_node_def():
 
 # ── NodeDef 判别联合 ────────────────────────────────────────────────────────────
 
+
 def test_node_def_discriminator_action():
     """WorkflowDef.nodes 可以通过判别联合解析 action 节点。"""
     data = {
         "id": "wf1",
         "name": "test",
-        "nodes": [
-            {"type": "action", "id": "n1", "handler": "h", "output_key": "out"}
-        ],
+        "nodes": [{"type": "action", "id": "n1", "handler": "h", "output_key": "out"}],
         "edges": [],
     }
     wf = WorkflowDef.model_validate(data)

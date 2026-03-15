@@ -218,6 +218,8 @@ class DAGExecutor:
 def _write_back(
     outputs: list[str], child_ctx: RunContext, parent_ctx: RunContext
 ) -> None:
-    """将子上下文的指定 outputs 键写回父上下文。"""
+    """将子上下文的指定 outputs 键写回父上下文。跳过子上下文中不存在的键（如条件分支未执行的输出）。"""
+    snapshot = child_ctx.snapshot()
     for key in outputs:
-        parent_ctx.set(key, child_ctx.get(key))
+        if key in snapshot:
+            parent_ctx.set(key, snapshot[key])

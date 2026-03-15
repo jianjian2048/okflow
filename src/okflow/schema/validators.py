@@ -115,15 +115,18 @@ def _check_outputs_referenced(workflow: WorkflowDef) -> None:
     """第⑤项：校验 outputs 中声明的变量键在对应子工作流中确实能被某个节点写入。"""
     for node in workflow.nodes:
         if isinstance(node, ConditionNodeDef):
-            for branch_key, branch_wf in node.branches.items():
-                branch_writable = _get_writable_keys(branch_wf)
-                for out_key in node.outputs:
-                    if out_key not in branch_writable:
-                        raise WorkflowValidationError(
-                            f"ConditionNode {node.id!r} declares output {out_key!r} "
-                            f"but branch {branch_key!r} has no node that writes it. "
-                            f"Writable keys: {sorted(branch_writable)}"
-                        )
+            # 合并所有分支的可写键：每个 output 键只需在至少一个分支中可写即可
+            all_branch_writable: set[str] = set()
+            for branch_wf in node.branches.values():
+                all_branch_writable.update(_get_writable_keys(branch_wf))
+            for out_key in node.outputs:
+                if out_key not in all_branch_writable:
+                    raise WorkflowValidationError(
+                        f"ConditionNode {node.id!r} declares output {out_key!r} "
+                        f"but no branch has a node that writes it. "
+                        f"Writable keys across all branches: {sorted(all_branch_writable)}"
+                    )
+            for branch_wf in node.branches.values():
                 _check_outputs_referenced(branch_wf)
 
         elif isinstance(node, ForEachNodeDef):

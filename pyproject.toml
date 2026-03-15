@@ -1,14 +1,37 @@
 [project]
 name = "okflow"
 version = "0.1.0"
-description = "Add your description here"
+description = "通用异步 DAG 工作流执行引擎"
 readme = "README.md"
 authors = [
     { name = "jian jian", email = "jianjian2048@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pydantic>=2.0",
+]
 
 [build-system]
 requires = ["uv_build>=0.9.10,<0.10.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "mypy>=1.0",
+    "ruff>=0.4",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["okflow"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true

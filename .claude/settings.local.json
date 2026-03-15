@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(C:/Users/jianjian/.claude/plugins/cache/claude-plugins-official/superpowers/5.0.2/skills/brainstorming/scripts/start-server.sh --project-dir \"D:/Srcs/UVProjects/okflow\")",
+      "Bash(curl:*)",
+      "Bash(C:/Users/jianjian/.claude/plugins/cache/claude-plugins-official/superpowers/5.0.2/skills/brainstorming/scripts/start-server.sh --project-dir \"D:/Srcs/UVProjects/okflow\" --host 0.0.0.0 --url-host localhost)",
+      "Bash(uv sync:*)",
+      "Bash(git add:*)",
+      "Bash(cd:*)",
+      "Bash(uv run:*)"
+    ]
+  }
+}

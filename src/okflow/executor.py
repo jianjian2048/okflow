@@ -210,7 +210,8 @@ class DAGExecutor:
             key = scope.outputs[0]
             collected.append(child_ctx.get(key))
 
-        assert group.collect_key is not None  # pooled 模式必须设置
+        if group.collect_key is None:
+            raise ScopeConfigError("pooled mode requires collect_key to be set")
         parent_ctx.set(group.collect_key, collected)
 
 

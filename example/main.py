@@ -232,8 +232,9 @@ async def main() -> None:
     root_scope = Scope(workflow=workflow)
     ctx = await DAGExecutor(registry).run(root_scope)
 
-    print()
-    print("── 最终结果 ──")
+    print(ctx)
+
+    print("=" * 50)
     print(f"等级列表: {ctx.get('grade_each.collected')}")
 
 
